@@ -1,0 +1,33 @@
+name: Construire PlantBot
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extraire PlantBot
+        run: unzip PlantBot-source-v0.1.zip
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      - name: Compiler l’APK
+        run: gradle -p PlantBot :app:assembleDebug
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PlantBot-APK
+          path: PlantBot/app/build/outputs/apk/debug/app-debug.apk
