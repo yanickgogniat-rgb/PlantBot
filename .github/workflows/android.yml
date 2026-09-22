@@ -13,7 +13,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Extraire PlantBot
-        run: unzip PlantBot-source-v0.5.0.zip
+        run: unzip -o PlantBot-source-v0.5.0.zip
+
+      - name: Corriger la configuration Kotlin
+        run: |
+          sed -i '1i import org.jetbrains.kotlin.gradle.dsl.JvmTarget\n' PlantBot/app/build.gradle.kts
+          sed -i 's/kotlinOptions { jvmTarget = "17" }/kotlin { compilerOptions { jvmTarget.set(JvmTarget.JVM_17) } }/' PlantBot/app/build.gradle.kts
 
       - uses: actions/setup-java@v4
         with:
