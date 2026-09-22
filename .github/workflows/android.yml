@@ -15,10 +15,13 @@ jobs:
       - name: Extraire PlantBot
         run: unzip -o PlantBot-source-v0.5.0.zip
 
-      - name: Corriger la configuration Kotlin
+      - name: Préparer la version 0.5.1
         run: |
           sed -i '1i import org.jetbrains.kotlin.gradle.dsl.JvmTarget\n' PlantBot/app/build.gradle.kts
           sed -i 's/kotlinOptions { jvmTarget = "17" }/kotlin { compilerOptions { jvmTarget.set(JvmTarget.JVM_17) } }/' PlantBot/app/build.gradle.kts
+          sed -i 's/versionCode = 12/versionCode = 13/' PlantBot/app/build.gradle.kts
+          sed -i 's/versionName = "0.5.0"/versionName = "0.5.1"/' PlantBot/app/build.gradle.kts
+          sed -i 's|aiError = "L’IA n’a pas pu répondre. Vérifiez Internet et réessayez."|aiError = "Erreur IA : ${it.message ?: it::class.simpleName}"|' PlantBot/app/src/main/java/ch/yanick/plantbot/MainActivity.kt
 
       - uses: actions/setup-java@v4
         with:
