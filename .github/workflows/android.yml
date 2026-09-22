@@ -15,13 +15,142 @@ jobs:
       - name: Extraire PlantBot
         run: unzip -o PlantBot-source-v0.5.0.zip
 
-      - name: Préparer la version 0.5.1
+      - name: Préparer PlantBot 0.5.2 avec App Check
         run: |
-          sed -i '1i import org.jetbrains.kotlin.gradle.dsl.JvmTarget\n' PlantBot/app/build.gradle.kts
-          sed -i 's/kotlinOptions { jvmTarget = "17" }/kotlin { compilerOptions { jvmTarget.set(JvmTarget.JVM_17) } }/' PlantBot/app/build.gradle.kts
-          sed -i 's/versionCode = 12/versionCode = 13/' PlantBot/app/build.gradle.kts
-          sed -i 's/versionName = "0.5.0"/versionName = "0.5.1"/' PlantBot/app/build.gradle.kts
-          sed -i 's|aiError = "L’IA n’a pas pu répondre. Vérifiez Internet et réessayez."|aiError = "Erreur IA : ${it.message ?: it::class.simpleName}"|' PlantBot/app/src/main/java/ch/yanick/plantbot/MainActivity.kt
+          python3 <<'PY'
+          from pathlib import Path
+
+          gradle = Path("PlantBot/app/build.gradle.kts")
+          text = gradle.read_text()
+
+          if not text.startswith("import org.jetbrains.kotlin.gradle.dsl.JvmTarget"):
+              text = "import org.jetbrains.kotlin.gradle.dsl.JvmTarget\n\n" + text
+
+          text = text.replace(
+              'kotlinOptions { jvmTarget = "17" }',
+              'kotlin { compilerOptions { jvmTarget.set(JvmTarget.JVM_17) } }'
+          )
+          text = text.replace('versionCode = 12', 'versionCode = 14')
+          text = text.replace('versionName = "0.5.0"', 'versionName = "0.5.2"')
+          text = text.replace(
+              'implementation("com.google.firebase:firebase-ai:17.17.0")',
+              'implementation("com.google.firebase:firebase-ai:17.17.0")\n'
+              '    implementation("com.google.firebase:firebase-appcheck-debug:19.4.1")'
+          )
+          gradle.write_text(text)
+
+          main = Path(
+              "PlantBot/app/src/main/java/ch/yanick/plantbot/MainActivity.kt"
+          )
+          text = main.read_text()
+
+          text = text.replace(
+              'import com.google.firebase.Firebase\n',
+              'import com.google.firebase.Firebase\n'
+              'import com.google.firebase.FirebaseApp\n'
+              'import com.google.firebase.appcheck.FirebaseAppCheck\n'
+              'import com.google.firebase.appcheck.debug.DebugAppCheckProviderFactory\n'
+          )
+
+          text = text.replace(
+              'import java.util.Locale\n',
+              'import java.util.Locale\n'
+              'import java.util.UUID\n'
+          )
+
+          text = text.replace(
+              'private const val JESSICA_UID = "tG1yO0fD1SUkSLKUzmYIrSPpSJn2"\n',
+              'private const val JESSICA_UID = "tG1yO0fD1SUkSLKUzmYIrSPpSJn2"\n'
+              'private var appCheckDebugToken = ""\n'
+          )
+
+          text = text.replace(
+              'super.onCreate(savedInstanceState)\n'
+              '        createChannel()',
+              'super.onCreate(savedInstanceState)\n'
+              '        appCheckDebugToken = initializeDebugAppCheck(this)\n'
+              '        createChannel()'
+          )
+
+          marker = 'class WateringWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params) {'
+
+          helper = '''
+          private fun initializeDebugAppCheck(context: Context): String {
+              val firebaseApp = FirebaseApp.getInstance()
+              val prefsName =
+                  "com.google.firebase.appcheck.debug.store.${firebaseApp.persistenceKey}"
+              val prefs = context.getSharedPreferences(
+                  prefsName,
+                  Context.MODE_PRIVATE
+              )
+              val key = "com.google.firebase.appcheck.debug.DEBUG_SECRET"
+
+              val token = prefs.getString(key, null)
+                  ?: UUID.randomUUID().toString().also {
+                      prefs.edit().putString(key, it).commit()
+                  }
+
+              FirebaseAppCheck.getInstance().installAppCheckProviderFactory(
+                  DebugAppCheckProviderFactory.getInstance()
+              )
+
+              return token
+          }
+
+          '''
+
+          text = text.replace(marker, helper + marker)
+
+          sync_line = '        item { SettingCard("Synchronisation du foyer", syncStatus) }\n'
+
+          app_check_card = '''        item {
+              Card(
+                  shape = RoundedCornerShape(20.dp),
+                  colors = CardDefaults.cardColors(containerColor = Color.White)
+              ) {
+                  Column(Modifier.fillMaxWidth().padding(18.dp)) {
+                      Text(
+                          "Clé App Check de test",
+                          fontWeight = FontWeight.Bold,
+                          color = DarkGreen
+                      )
+                      Text(
+                          appCheckDebugToken,
+                          color = Color.Gray,
+                          fontSize = 12.sp
+                      )
+                      Text(
+                          "Gardez cette clé privée.",
+                          color = Color(0xFFB3261E),
+                          fontSize = 12.sp
+                      )
+                      TextButton(onClick = {
+                          val clipboard = context.getSystemService(
+                              Context.CLIPBOARD_SERVICE
+                          ) as ClipboardManager
+                          clipboard.setPrimaryClip(
+                              ClipData.newPlainText(
+                                  "Clé App Check PlantBot",
+                                  appCheckDebugToken
+                              )
+                          )
+                      }) {
+                          Text("Copier la clé App Check")
+                      }
+                  }
+              }
+          }
+          '''
+
+          text = text.replace(sync_line, sync_line + app_check_card)
+
+          text = text.replace(
+              'Plant’Bot 0.4.4 · Signature permanente activée.',
+              'Plant’Bot 0.5.2 · App Check test activé.'
+          )
+
+          main.write_text(text)
+          PY
 
       - uses: actions/setup-java@v4
         with:
