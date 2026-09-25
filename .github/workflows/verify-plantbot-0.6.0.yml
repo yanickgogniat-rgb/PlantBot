@@ -25,3 +25,20 @@ jobs:
         env:
           PLANTBOT_KEYSTORE_PASSWORD: debug-only-placeholder
         run: gradle -p PlantBot :app:assembleDebug
+      - name: Construire l'APK release non signé
+        env:
+          PLANTBOT_KEYSTORE_PASSWORD: debug-only-placeholder
+        run: |
+          sed -i 's/signingConfig = signingConfigs.getByName("release")/signingConfig = null/' PlantBot/app/build.gradle.kts
+          gradle -p PlantBot :app:assembleRelease
+          cp "$(find "$ANDROID_HOME/build-tools" -path '*/lib/apksigner.jar' | sort -V | tail -1)" PlantBot/apksigner.jar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PlantBot-0.6.0-unsigned
+          path: PlantBot/app/build/outputs/apk/release/app-release-unsigned.apk
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Android-apksigner
+          path: PlantBot/apksigner.jar
+          if-no-files-found: error
