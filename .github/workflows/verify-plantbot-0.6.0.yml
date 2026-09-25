@@ -1,0 +1,27 @@
+name: Vérifier PlantBot 0.6.0
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - PlantBot-v0.6.0.patch
+      - .github/workflows/verify-plantbot-0.6.0.yml
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: unzip -o PlantBot-source-v0.5.0.zip
+      - run: patch -p1 -d PlantBot -i "$GITHUB_WORKSPACE/PlantBot-v0.6.0.patch"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+      - name: Vérifier la compilation Android
+        env:
+          PLANTBOT_KEYSTORE_PASSWORD: debug-only-placeholder
+        run: gradle -p PlantBot :app:assembleDebug
