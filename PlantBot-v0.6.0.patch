@@ -1,0 +1,574 @@
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -0,0 +1,2 @@
++import org.jetbrains.kotlin.gradle.dsl.JvmTarget
++
+@@ -15,2 +17,2 @@
+-        versionCode = 12
+-        versionName = "0.5.0"
++        versionCode = 16
++        versionName = "0.6.0"
+@@ -23 +25,5 @@
+-    kotlinOptions { jvmTarget = "17" }
++    kotlin {
++        compilerOptions {
++            jvmTarget.set(JvmTarget.JVM_17)
++        }
++    }
+@@ -52,0 +59 @@
++    implementation("com.google.firebase:firebase-appcheck-debug:19.4.1")
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -2,0 +3 @@
++    <uses-permission android:name="android.permission.INTERNET" />
+--- a/app/src/main/java/ch/yanick/plantbot/MainActivity.kt
++++ b/app/src/main/java/ch/yanick/plantbot/MainActivity.kt
+@@ -25,0 +26,3 @@
++import com.google.firebase.FirebaseApp
++import com.google.firebase.appcheck.FirebaseAppCheck
++import com.google.firebase.appcheck.debug.DebugAppCheckProviderFactory
+@@ -54,0 +58 @@
++import androidx.compose.runtime.saveable.rememberSaveable
+@@ -66,0 +71 @@
++import androidx.core.content.ContextCompat
+@@ -75,0 +81 @@
++import java.util.UUID
+@@ -77,0 +84 @@
++import kotlinx.coroutines.runBlocking
+@@ -86,0 +94 @@
++private var appCheckDebugToken = ""
+@@ -98 +106,5 @@
+-    val description: String = ""
++    val description: String = "",
++    val place: String = "indoor",
++    val exposure: String = "open",
++    val lastChecked: Long = 0L,
++    val soilState: String = ""
+@@ -100,0 +113 @@
++    val daysSinceChecked: Int get() = if (lastChecked == 0L) Int.MAX_VALUE else ((System.currentTimeMillis() - lastChecked) / 86_400_000L).toInt().coerceAtLeast(0)
+@@ -106,0 +120 @@
++        appCheckDebugToken = initializeDebugAppCheck(this)
+@@ -125,0 +140,14 @@
++private fun initializeDebugAppCheck(context: Context): String {
++    val firebaseApp = FirebaseApp.getInstance()
++    val prefsName = "com.google.firebase.appcheck.debug.store.${firebaseApp.persistenceKey}"
++    val prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
++    val key = "com.google.firebase.appcheck.debug.DEBUG_SECRET"
++    val token = prefs.getString(key, null) ?: UUID.randomUUID().toString().also {
++        prefs.edit().putString(key, it).commit()
++    }
++    FirebaseAppCheck.getInstance().installAppCheckProviderFactory(
++        DebugAppCheckProviderFactory.getInstance()
++    )
++    return token
++}
++
+@@ -129,2 +157,7 @@
+-        if (!store.notificationsEnabled()) return Result.success()
+-        val due = store.load().filter { it.daysSinceWatered >= it.intervalDays }
++        if (!store.notificationsEnabled() || !canNotify(applicationContext)) return Result.success()
++        val plants = store.load()
++        val outdoor = plants.filter { it.place == "outdoor" }
++        val weather = if (outdoor.isEmpty()) null else runBlocking {
++            WeatherStore(applicationContext).refresh()
++        }
++        val due = plants.filter { checkAdvice(it, weather).remaining <= 0 }
+@@ -139,0 +173 @@
++        sendWeatherAlerts(applicationContext, plants, weather)
+@@ -141,0 +176,27 @@
++}
++
++private fun canNotify(context: Context): Boolean =
++    Build.VERSION.SDK_INT < 33 ||
++        ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
++
++private fun sendWeatherAlerts(context: Context, plants: List<Plant>, weather: GalsWeather?) {
++    if (weather?.fresh != true || plants.none { it.place == "outdoor" }) return
++    if (!PlantStore(context).notificationsEnabled() || !canNotify(context)) return
++    val prefs = context.getSharedPreferences("weather_alerts", Context.MODE_PRIVATE)
++    val manager = context.getSystemService(NotificationManager::class.java)
++    fun alert(key: String, id: Int, title: String, message: String) {
++        if (System.currentTimeMillis() - prefs.getLong(key, 0L) < 20 * 60 * 60 * 1000L) return
++        manager.notify(id, NotificationCompat.Builder(context, "watering")
++            .setSmallIcon(android.R.drawable.ic_dialog_alert)
++            .setContentTitle(title)
++            .setContentText(message)
++            .setStyle(NotificationCompat.BigTextStyle().bigText(message))
++            .setAutoCancel(true)
++            .build())
++        prefs.edit().putLong(key, System.currentTimeMillis()).apply()
++    }
++    if (weather.frost) alert("frost", 1002, "PlantBot · Gel possible à Gals",
++        "Vérifiez les plantes sensibles et mesurez la température sous la serre plastique.")
++    if (weather.greenhouseHeat && plants.any { it.place == "outdoor" && it.exposure == "greenhouse" })
++        alert("heat", 1003, "PlantBot · Serre à surveiller",
++            "Chaleur possible sous le plastique : mesurez la température, aérez et vérifiez les pots.")
+@@ -152 +213 @@
+-                Plant(o.getLong("id"), o.getString("name"), o.optString("species"), o.getInt("interval"), o.getLong("watered"), o.getInt("amount"), o.optString("photoUri"), o.optString("description"))
++                Plant(o.getLong("id"), o.getString("name"), o.optString("species"), o.getInt("interval"), o.getLong("watered"), o.getInt("amount"), o.optString("photoUri"), o.optString("description"), o.optString("place", "indoor"), o.optString("exposure", "open"), o.optLong("lastChecked"), o.optString("soilState"))
+@@ -161,0 +223,2 @@
++            put("place", p.place); put("exposure", p.exposure)
++            put("lastChecked", p.lastChecked); put("soilState", p.soilState)
+@@ -181,0 +245 @@
++    val context = LocalContext.current
+@@ -182,0 +247,13 @@
++    val weatherStore = remember { WeatherStore(context.applicationContext) }
++    var weather by remember { mutableStateOf(weatherStore.load()) }
++    var weatherLoading by remember { mutableStateOf(false) }
++    val weatherScope = rememberCoroutineScope()
++    fun refreshWeather(force: Boolean = false) {
++        if (weatherLoading) return
++        weatherLoading = true
++        weatherScope.launch {
++            weather = weatherStore.refresh(force)
++            sendWeatherAlerts(context.applicationContext, plants, weather)
++            weatherLoading = false
++        }
++    }
+@@ -188 +265,3 @@
+-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
++    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
++        if (granted) sendWeatherAlerts(context.applicationContext, plants, weather)
++    }
+@@ -195 +274 @@
+-            .set(mapOf("id" to plant.id, "name" to plant.name, "species" to plant.species, "intervalDays" to plant.intervalDays, "lastWatered" to plant.lastWatered, "lastAmountDl" to plant.lastAmountDl, "description" to plant.description, "photoData" to plant.photoUri.takeIf { it.startsWith("data:image/") }.orEmpty()))
++            .set(mapOf("id" to plant.id, "name" to plant.name, "species" to plant.species, "intervalDays" to plant.intervalDays, "lastWatered" to plant.lastWatered, "lastAmountDl" to plant.lastAmountDl, "description" to plant.description, "photoData" to plant.photoUri.takeIf { it.startsWith("data:image/") }.orEmpty(), "place" to plant.place, "exposure" to plant.exposure, "lastChecked" to plant.lastChecked, "soilState" to plant.soilState))
+@@ -223 +302 @@
+-                        Plant(id, d.getString("name").orEmpty(), d.getString("species").orEmpty(), (d.getLong("intervalDays") ?: 7).toInt(), d.getLong("lastWatered") ?: System.currentTimeMillis(), (d.getLong("lastAmountDl") ?: 0).toInt(), photo, d.getString("description").orEmpty())
++                        Plant(id, d.getString("name").orEmpty(), d.getString("species").orEmpty(), (d.getLong("intervalDays") ?: 7).toInt(), d.getLong("lastWatered") ?: System.currentTimeMillis(), (d.getLong("lastAmountDl") ?: 0).toInt(), photo, d.getString("description").orEmpty(), d.getString("place") ?: "indoor", d.getString("exposure") ?: "open", d.getLong("lastChecked") ?: 0L, d.getString("soilState").orEmpty())
+@@ -233,0 +313,3 @@
++    }
++    LaunchedEffect(plants.any { it.place == "outdoor" }) {
++        if (plants.any { it.place == "outdoor" }) refreshWeather()
+@@ -254,2 +336,5 @@
+-                            val priority = plants.minByOrNull { it.moisture }
+-                            MascotCard(priority, onWater = { priority?.let { watering = it } })
++                            val priority = plants.minByOrNull { checkAdvice(it, weather).remaining }
++                            MascotCard(priority, priority?.let { checkAdvice(it, weather) }, onWater = { priority?.let { watering = it } })
++                        }
++                        if (plants.any { it.place == "outdoor" }) item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(columns) }) {
++                            WeatherCard(weather, weatherLoading, plants) { refreshWeather(true) }
+@@ -260 +345 @@
+-                        items(plants, key = { it.id }) { plant -> PlantCard(plant) { selectedPlant = plant } }
++                        items(plants, key = { it.id }) { plant -> PlantCard(plant, checkAdvice(plant, weather)) { selectedPlant = plant } }
+@@ -263 +348 @@
+-                AppScreen.REMINDERS -> RemindersScreen(plants, Modifier.padding(padding)) { watering = it }
++                AppScreen.REMINDERS -> RemindersScreen(plants, weather, Modifier.padding(padding)) { watering = it }
+@@ -268 +353 @@
+-            plants = plants.map { if (it.id == plant.id) it.copy(lastWatered = System.currentTimeMillis(), lastAmountDl = amount) else it }
++            plants = plants.map { if (it.id == plant.id) it.copy(lastWatered = System.currentTimeMillis(), lastAmountDl = amount, lastChecked = 0, soilState = "") else it }
+@@ -271,2 +356,2 @@
+-        if (showAdd) AddPlantDialog(onDismiss = { showAdd = false }) { name, species, days ->
+-            plants = plants + Plant(System.currentTimeMillis(), name, species, days, System.currentTimeMillis(), 0)
++        if (showAdd) AddPlantDialog(onDismiss = { showAdd = false }) { draft ->
++            plants = plants + draft.copy(id = System.currentTimeMillis(), lastWatered = System.currentTimeMillis())
+@@ -278,0 +364 @@
++                advice = checkAdvice(current, weather),
+@@ -284,0 +371,5 @@
++                onCheck = { soil ->
++                    val updated = current.copy(lastChecked = System.currentTimeMillis(), soilState = soil)
++                    plants = plants.map { if (it.id == current.id) updated else it }
++                    store.save(plants); saveCloud(updated); selectedPlant = updated
++                },
+@@ -298,2 +389,2 @@
+-@Composable private fun MascotCard(priority: Plant?, onWater: () -> Unit) {
+-    val moisture = priority?.moisture ?: 100
++@Composable private fun MascotCard(priority: Plant?, advice: CheckAdvice?, onWater: () -> Unit) {
++    val remaining = advice?.remaining ?: 7
+@@ -301,2 +392,2 @@
+-        moisture < 30 -> ch.yanick.plantbot.R.drawable.plant_mascot_thirsty
+-        moisture <= 60 -> ch.yanick.plantbot.R.drawable.plant_mascot_calm
++        remaining <= 0 -> ch.yanick.plantbot.R.drawable.plant_mascot_thirsty
++        remaining <= 2 -> ch.yanick.plantbot.R.drawable.plant_mascot_calm
+@@ -306,2 +397,2 @@
+-        moisture < 30 -> "J’ai soif…"
+-        moisture <= 60 -> "Je vais bien"
++        remaining <= 0 -> "Vérifie la terre"
++        remaining <= 2 -> "Bientôt à vérifier"
+@@ -319,2 +410,2 @@
+-                Text("Humidité estimée", color = DarkGreen)
+-                Text("$moisture %", fontSize = 38.sp, fontWeight = FontWeight.Black, color = DarkGreen)
++                Text("Prochain contrôle", color = DarkGreen)
++                Text(if (remaining <= 0) "Aujourd’hui" else "Dans $remaining j", fontSize = 24.sp, fontWeight = FontWeight.Black, color = DarkGreen)
+@@ -329,2 +420,2 @@
+-@Composable private fun PlantCard(plant: Plant, onOpen: () -> Unit) {
+-    val alert = plant.daysSinceWatered >= plant.intervalDays
++@Composable private fun PlantCard(plant: Plant, advice: CheckAdvice, onOpen: () -> Unit) {
++    val alert = advice.remaining <= 0
+@@ -340,3 +431,4 @@
+-            Spacer(Modifier.height(15.dp)); LinearProgressIndicator(progress = { plant.moisture / 100f }, modifier = Modifier.fillMaxWidth().height(9.dp).clip(CircleShape), color = if (alert) Orange else Green, trackColor = Color(0xFFE8ECE8))
+-            Spacer(Modifier.height(9.dp)); Text(if (alert) "💧 À vérifier aujourd’hui" else "💧 Humidité estimée ${plant.moisture}%", color = if (alert) Orange else Green, fontWeight = FontWeight.SemiBold)
+-            Text("Dernier arrosage : ${plant.lastAmountDl} dl · ${date(plant.lastWatered)}", fontSize = 12.sp, color = Color.Gray)
++            Spacer(Modifier.height(15.dp))
++            Text(if (alert) "💧 Terre à vérifier aujourd’hui" else "🌱 Vérification dans ${advice.remaining} jour(s)", color = if (alert) Orange else Green, fontWeight = FontWeight.SemiBold)
++            Text(if (plant.place == "indoor") "Intérieur" else "Gals · ${exposureLabel(plant.exposure)}", fontSize = 12.sp, color = Color.Gray)
++            Text(if (plant.lastAmountDl > 0) "Dernier arrosage : ${plant.lastAmountDl} dl · ${date(plant.lastWatered)}" else "Arrosage non encore renseigné", fontSize = 12.sp, color = Color.Gray)
+@@ -355 +447 @@
+-@Composable private fun RemindersScreen(plants: List<Plant>, modifier: Modifier = Modifier, onPlant: (Plant) -> Unit) {
++@Composable private fun RemindersScreen(plants: List<Plant>, weather: GalsWeather?, modifier: Modifier = Modifier, onPlant: (Plant) -> Unit) {
+@@ -358,2 +450,3 @@
+-        lazyItems(plants.sortedBy { it.intervalDays - it.daysSinceWatered }) { plant ->
+-            val remaining = plant.intervalDays - plant.daysSinceWatered
++        lazyItems(plants.sortedBy { checkAdvice(it, weather).remaining }) { plant ->
++            val advice = checkAdvice(plant, weather)
++            val remaining = advice.remaining
+@@ -365,2 +458,3 @@
+-                    Text("${plant.moisture}%", fontWeight = FontWeight.Bold, color = DarkGreen)
+-                }
++                    Text(if (plant.place == "indoor") "Int." else "Ext.", fontWeight = FontWeight.Bold, color = DarkGreen)
++                }
++                Text(advice.note, modifier = Modifier.padding(start = 18.dp, end = 18.dp, bottom = 14.dp), fontSize = 12.sp, color = Color.Gray)
+@@ -369,0 +464,27 @@
++    }
++}
++
++private fun exposureLabel(exposure: String) = when (exposure) {
++    "shelter" -> "à l’abri"
++    "greenhouse" -> "sous serre plastique"
++    else -> "exposée à la pluie"
++}
++
++@Composable private fun WeatherCard(weather: GalsWeather?, loading: Boolean, plants: List<Plant>, onRefresh: () -> Unit) {
++    Card(colors = CardDefaults.cardColors(containerColor = SoftGreen), shape = RoundedCornerShape(20.dp)) {
++        Column(Modifier.padding(16.dp)) {
++            Text("Météo de Gals · plantes d’extérieur", fontWeight = FontWeight.Bold, color = DarkGreen)
++            Text(if (weather?.fresh == true) {
++                val low = weather.min.firstOrNull()?.toInt() ?: 0
++                val high = weather.max.firstOrNull()?.toInt() ?: 0
++                "Aujourd’hui : $low à $high °C · prévisions actualisées"
++            } else "Prévisions indisponibles : contrôlez les pots manuellement.", color = DarkGreen)
++            if (weather?.fresh == true && weather.frost) {
++                Text("⚠️ Gel possible : vérifiez les plantes sensibles et la température sous la serre.", color = Color(0xFFB3261E), fontWeight = FontWeight.SemiBold)
++            }
++            if (weather?.fresh == true && weather.greenhouseHeat && plants.any { it.place == "outdoor" && it.exposure == "greenhouse" }) {
++                Text("⚠️ Chaleur possible sous la serre : contrôlez la température et aérez.", color = Color(0xFFB3261E), fontWeight = FontWeight.SemiBold)
++            }
++            Text("MétéoSuisse via Open-Meteo · CC BY 4.0. Sous serre, ce sont les températures extérieures.", fontSize = 12.sp, color = Color.Gray)
++            TextButton(enabled = !loading, onClick = onRefresh) { Text(if (loading) "Actualisation…" else "Actualiser la météo") }
++        }
+@@ -392,0 +514,13 @@
++                    Text("Clé App Check de test", fontWeight = FontWeight.Bold, color = DarkGreen)
++                    Text(appCheckDebugToken, color = Color.Gray, fontSize = 12.sp)
++                    Text("Gardez cette clé privée.", color = Color(0xFFB3261E), fontSize = 12.sp)
++                    TextButton(onClick = {
++                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
++                        clipboard.setPrimaryClip(ClipData.newPlainText("Clé App Check PlantBot", appCheckDebugToken))
++                    }) { Text("Copier la clé App Check") }
++                }
++            }
++        }
++        item {
++            Card(shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
++                Column(Modifier.fillMaxWidth().padding(18.dp)) {
+@@ -407 +541 @@
+-        item { Text("Plant’Bot 0.4.4 · Signature permanente activée.", color = Color.Gray, fontSize = 12.sp) }
++        item { Text("Plant’Bot 0.6.0 · Gals et suivi des plantes.", color = Color.Gray, fontSize = 12.sp) }
+@@ -465,0 +600 @@
++    advice: CheckAdvice,
+@@ -468,0 +604 @@
++    onCheck: (String) -> Unit,
+@@ -474,0 +611,2 @@
++    var place by remember(plant.id) { mutableStateOf(plant.place) }
++    var exposure by remember(plant.id) { mutableStateOf(plant.exposure) }
+@@ -506,0 +645 @@
++                PlaceSelector(place, exposure, { place = it }, { exposure = it })
+@@ -520 +659 @@
+-                                    Tu es un spécialiste prudent des plantes d'intérieur en Suisse.
++                                    Tu es un spécialiste prudent des plantes en Suisse.
+@@ -524 +663 @@
+-                                    - Emplacement habituel : près d'une fenêtre avec voilage fin, sans soleil direct, à 21-22 °C
++                                    - Emplacement : ${if (place == "indoor") "intérieur près d'une fenêtre voilée, à 21-22 °C" else "extérieur à Gals, ${exposureLabel(exposure)}"}
+@@ -539 +678 @@
+-                                    aiError = "L’IA n’a pas pu répondre. Vérifiez Internet et réessayez."
++                                    aiError = "Erreur IA : ${it.message ?: it::class.simpleName}"
+@@ -555,0 +695,8 @@
++                Text(advice.note, fontSize = 13.sp, color = DarkGreen)
++                Text("Terre vérifiée : ${when (plant.soilState) { "dry" -> "sèche"; "moist" -> "encore humide"; "wet" -> "très humide"; else -> "non renseignée" }}", fontSize = 12.sp, color = Color.Gray)
++                Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
++                    TextButton(onClick = { onCheck("dry") }) { Text("Sèche") }
++                    TextButton(onClick = { onCheck("moist") }) { Text("Humide") }
++                    TextButton(onClick = { onCheck("wet") }) { Text("Très humide") }
++                }
++                Text("La vérification seule n’enregistre jamais un arrosage.", fontSize = 12.sp, color = Color.Gray)
+@@ -561 +708 @@
+-            Button(enabled = name.isNotBlank(), onClick = { onSave(plant.copy(name = name.trim(), species = species.trim().ifBlank { name.trim() }, intervalDays = days.toInt(), photoUri = photoUri, description = description.trim())); onDismiss() }) { Text("Enregistrer") }
++            Button(enabled = name.isNotBlank(), onClick = { onSave(plant.copy(name = name.trim(), species = species.trim().ifBlank { name.trim() }, intervalDays = days.toInt(), photoUri = photoUri, description = description.trim(), place = place, exposure = exposure)); onDismiss() }) { Text("Enregistrer") }
+@@ -577,6 +724,120 @@
+-    AlertDialog(onDismissRequest = onDismiss, title = { Text("Arroser ${plant.name}") }, text = { Column { Text("Quelle quantité avez-vous donnée ?"); Spacer(Modifier.height(14.dp)); Text("${amount.toInt()} dl", fontSize = 30.sp, fontWeight = FontWeight.Bold, color = Green); Slider(amount, { amount = it }, valueRange = 1f..15f, steps = 13); Text("L’humidité affichée reste une estimation, sans capteur dans le pot.", fontSize = 12.sp, color = Color.Gray) } }, confirmButton = { Button(onClick = { onConfirm(amount.toInt()) }) { Text("Enregistrer") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Annuler") } })
+-}
+-
+-@Composable private fun AddPlantDialog(onDismiss: () -> Unit, onAdd: (String, String, Int) -> Unit) {
+-    var name by remember { mutableStateOf("") }; var species by remember { mutableStateOf("") }; var days by remember { mutableFloatStateOf(7f) }
+-    AlertDialog(onDismissRequest = onDismiss, title = { Text("Ajouter une plante") }, text = { Column { OutlinedTextField(name, { name = it }, label = { Text("Nom") }); Spacer(Modifier.height(8.dp)); OutlinedTextField(species, { species = it }, label = { Text("Espèce") }); Spacer(Modifier.height(12.dp)); Text("Vérifier tous les ${days.toInt()} jours"); Slider(days, { days = it }, valueRange = 2f..21f, steps = 18) } }, confirmButton = { Button(enabled = name.isNotBlank(), onClick = { onAdd(name, species.ifBlank { name }, days.toInt()) }) { Text("Ajouter") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Annuler") } })
++    AlertDialog(onDismissRequest = onDismiss, title = { Text("Arroser ${plant.name}") }, text = { Column {
++        Text("Quelle quantité avez-vous réellement donnée ?")
++        Spacer(Modifier.height(14.dp))
++        Text("${amount.toInt()} dl", fontSize = 30.sp, fontWeight = FontWeight.Bold, color = Green)
++        Slider(amount, { amount = it }, valueRange = 1f..15f, steps = 13)
++        if (plant.place == "outdoor" && plant.exposure == "greenhouse")
++            Text("Sous serre, attendez que la terre ait réellement besoin d'eau. En hiver, les apports sont souvent beaucoup plus espacés. Si vous n'avez pas arrosé, appuyez sur Annuler.", fontSize = 12.sp, color = DarkGreen)
++        else Text("Vérifiez la terre avant d'arroser. Cette quantité est seulement le dernier volume saisi.", fontSize = 12.sp, color = Color.Gray)
++    } }, confirmButton = { Button(onClick = { onConfirm(amount.toInt()) }) { Text("Enregistrer") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Annuler") } })
++}
++
++@Composable private fun PlaceSelector(
++    place: String,
++    exposure: String,
++    onPlace: (String) -> Unit,
++    onExposure: (String) -> Unit
++) {
++    Text("Emplacement", fontWeight = FontWeight.SemiBold, color = DarkGreen)
++    Row {
++        FilterChip(selected = place == "indoor", onClick = { onPlace("indoor") }, label = { Text("Intérieur") })
++        Spacer(Modifier.width(8.dp))
++        FilterChip(selected = place == "outdoor", onClick = { onPlace("outdoor") }, label = { Text("Extérieur · Gals") })
++    }
++    if (place == "outdoor") {
++        Text("Situation actuelle du pot", fontSize = 13.sp, color = DarkGreen)
++        listOf(
++            "open" to "Exposé à la pluie",
++            "shelter" to "À l’abri de la pluie",
++            "greenhouse" to "Sous serre plastique"
++        ).forEach { (value, title) ->
++            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable { onExposure(value) }) {
++                RadioButton(selected = exposure == value, onClick = { onExposure(value) })
++                Text(title)
++            }
++        }
++        if (exposure == "greenhouse") Text(
++            "Changez ce réglage quand vous installez ou retirez la serre. En hiver, espacez beaucoup les arrosages si la terre reste humide ; la température sous le plastique n’est pas mesurée.",
++            fontSize = 12.sp, color = Color.Gray
++        )
++    }
++}
++
++private fun chatGptPlantPrompt(name: String, species: String, place: String): String = """
++Je veux ajouter une plante à PlantBot. Je peux joindre une photo pour l'identification.
++Nom : ${name.ifBlank { "à déterminer" }}. Espèce : ${species.ifBlank { "à déterminer" }}.
++Emplacement : ${if (place == "indoor") "intérieur près d'une fenêtre voilée, 21-22 °C" else "extérieur à Gals, Suisse"}.
++Réponds uniquement avec un objet JSON sans bloc de code, ayant exactement ces clés :
++{"name":"nom usuel","species":"nom botanique ou identification incertaine","description":"conseils pratiques en français : lumière, vérification du substrat et arrosage, températures, saison, toxicité connue et vigilance","intervalDays":7,"place":"$place","exposure":"open"}
++intervalDays est une fréquence de VÉRIFICATION de la terre, entre 2 et 21 jours, jamais une obligation d'arroser. Si une photo ou l'identification est incertaine, indique-le dans la description et n'invente pas l'espèce. Pour une plante d'extérieur, exposure sera corrigé manuellement dans PlantBot selon qu'elle reçoit la pluie, est abritée ou sous serre. Reste concis.
++""".trimIndent()
++
++private fun parsePlantImport(raw: String): Plant {
++    require(raw.length <= 12000) { "Texte trop long." }
++    val start = raw.indexOf('{')
++    val end = raw.lastIndexOf('}')
++    require(start >= 0 && end > start) { "Copiez la réponse JSON complète de ChatGPT." }
++    val o = JSONObject(raw.substring(start, end + 1))
++    val name = o.getString("name").trim().take(100)
++    require(name.isNotBlank()) { "Le nom est manquant." }
++    val place = o.optString("place", "indoor").takeIf { it in listOf("indoor", "outdoor") } ?: "indoor"
++    val exposure = o.optString("exposure", "open").takeIf { it in listOf("open", "shelter", "greenhouse") } ?: "open"
++    return Plant(0L, name, o.optString("species").trim().ifBlank { name }.take(100),
++        o.optInt("intervalDays", 7).coerceIn(2, 21), 0L, 0,
++        description = o.optString("description").trim().take(2500),
++        place = place, exposure = exposure)
++}
++
++@Composable private fun AddPlantDialog(onDismiss: () -> Unit, onAdd: (Plant) -> Unit) {
++    val context = LocalContext.current
++    var name by rememberSaveable { mutableStateOf("") }
++    var species by rememberSaveable { mutableStateOf("") }
++    var description by rememberSaveable { mutableStateOf("") }
++    var place by rememberSaveable { mutableStateOf("indoor") }
++    var exposure by rememberSaveable { mutableStateOf("open") }
++    var days by rememberSaveable { mutableFloatStateOf(7f) }
++    var importText by rememberSaveable { mutableStateOf("") }
++    var importError by rememberSaveable { mutableStateOf("") }
++    AlertDialog(
++        onDismissRequest = onDismiss,
++        title = { Text("Ajouter une plante") },
++        text = {
++            Column(Modifier.fillMaxWidth().heightIn(max = 520.dp).verticalScroll(rememberScrollState())) {
++                Text("Une photo peut être ajoutée dans la fiche après l’enregistrement.", fontSize = 12.sp, color = Color.Gray)
++                OutlinedTextField(name, { name = it }, label = { Text("Nom") }, modifier = Modifier.fillMaxWidth())
++                OutlinedTextField(species, { species = it }, label = { Text("Espèce") }, modifier = Modifier.fillMaxWidth())
++                OutlinedTextField(description, { description = it }, label = { Text("Conseils") }, minLines = 2, modifier = Modifier.fillMaxWidth())
++                PlaceSelector(place, exposure, { place = it }, { exposure = it })
++                Text("Vérifier la terre tous les ${days.toInt()} jours", color = DarkGreen)
++                Slider(days, { days = it }, valueRange = 2f..21f, steps = 18)
++                HorizontalDivider()
++                Text("Préparer la fiche avec ChatGPT", fontWeight = FontWeight.Bold, color = DarkGreen)
++                OutlinedButton(onClick = {
++                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
++                    clipboard.setPrimaryClip(ClipData.newPlainText("Demande PlantBot", chatGptPlantPrompt(name, species, place)))
++                    runCatching {
++                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://chatgpt.com/")))
++                    }.onFailure { importError = "Ouvrez ChatGPT, puis collez la demande copiée." }
++                }, modifier = Modifier.fillMaxWidth()) { Text("Demander à ChatGPT · copier la demande") }
++                Text("Collez la demande dans ChatGPT et joignez-y votre photo si nécessaire. Copiez ensuite sa réponse ici.", fontSize = 12.sp, color = Color.Gray)
++                OutlinedTextField(importText, { importText = it }, label = { Text("Réponse de ChatGPT à coller") }, minLines = 3, modifier = Modifier.fillMaxWidth())
++                OutlinedButton(onClick = {
++                    runCatching { parsePlantImport(importText) }
++                        .onSuccess {
++                            name = it.name; species = it.species; description = it.description
++                            days = it.intervalDays.toFloat(); place = it.place; exposure = it.exposure
++                            importError = ""
++                        }.onFailure { importError = it.message ?: "Réponse JSON invalide." }
++                }, modifier = Modifier.fillMaxWidth()) { Text("Remplir les champs") }
++                if (importError.isNotBlank()) Text(importError, color = Color(0xFFB3261E), fontSize = 12.sp)
++                Text("Vérifiez et corrigez les champs avant d’ajouter la plante.", fontSize = 12.sp, color = Color.Gray)
++            }
++        },
++        confirmButton = {
++            Button(enabled = name.isNotBlank(), onClick = {
++                onAdd(Plant(0L, name.trim(), species.trim().ifBlank { name.trim() },
++                    days.toInt(), 0L, 0, description = description.trim(), place = place, exposure = exposure))
++            }) { Text("Ajouter") }
++        },
++        dismissButton = { TextButton(onClick = onDismiss) { Text("Annuler") } }
++    )
+--- /dev/null
++++ b/app/src/main/java/ch/yanick/plantbot/Weather.kt
+@@ -0,0 +1,129 @@
++package ch.yanick.plantbot
++
++import android.content.Context
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.withContext
++import org.json.JSONObject
++import java.net.HttpURLConnection
++import java.net.URL
++
++/** The forecast is for Gals, never a measurement inside a pot or greenhouse. */
++data class GalsWeather(
++    val fetchedAt: Long,
++    val max: List<Double>,
++    val min: List<Double>,
++    val rain: List<Double>,
++    val sunshine: List<Double>
++) {
++    val fresh: Boolean get() = System.currentTimeMillis() - fetchedAt in 0..(12 * 60 * 60 * 1000L)
++    val hot: Boolean get() = max.take(3).count { it >= 30.0 } >= 2
++    val cool: Boolean get() = max.take(3).count { it <= 12.0 } >= 2
++    val frost: Boolean get() = min.take(3).any { it <= 2.0 }
++    val rainExpected: Boolean get() = rain.take(3).any { it >= 4.0 }
++    val greenhouseHeat: Boolean get() = max.take(3).indices.any { index ->
++        max[index] >= 25.0 || (max[index] >= 18.0 && sunshine.getOrElse(index) { 0.0 } >= 7200.0)
++    }
++
++    companion object {
++        fun fromJson(raw: String): GalsWeather {
++            val root = JSONObject(raw)
++            val daily = root.getJSONObject("daily")
++            fun values(key: String): List<Double> {
++                val a = daily.getJSONArray(key)
++                return (0 until a.length()).map { a.getDouble(it) }
++            }
++            val max = values("temperature_2m_max")
++            val min = values("temperature_2m_min")
++            val rain = values("precipitation_sum")
++            val sunshine = values("sunshine_duration")
++            require(max.size >= 3 && min.size >= 3 && rain.size >= 3 && sunshine.size >= 3)
++            return GalsWeather(System.currentTimeMillis(), max, min, rain, sunshine)
++        }
++    }
++}
++
++class WeatherStore(context: Context) {
++    private val prefs = context.getSharedPreferences("gals_weather", Context.MODE_PRIVATE)
++
++    fun load(): GalsWeather? = runCatching {
++        GalsWeather(
++            prefs.getLong("updated", 0L),
++            readArray("max"),
++            readArray("min"),
++            readArray("rain"),
++            readArray("sunshine")
++        ).takeIf { it.fresh && it.max.size >= 3 && it.min.size >= 3 && it.rain.size >= 3 && it.sunshine.size >= 3 }
++    }.getOrNull()
++
++    private fun readArray(key: String): List<Double> {
++        val a = org.json.JSONArray(prefs.getString(key, "[]"))
++        return (0 until a.length()).map { a.getDouble(it) }
++    }
++
++    fun save(weather: GalsWeather) {
++        prefs.edit()
++            .putLong("updated", weather.fetchedAt)
++            .putString("max", org.json.JSONArray(weather.max).toString())
++            .putString("min", org.json.JSONArray(weather.min).toString())
++            .putString("rain", org.json.JSONArray(weather.rain).toString())
++            .putString("sunshine", org.json.JSONArray(weather.sunshine).toString())
++            .apply()
++    }
++
++    suspend fun refresh(force: Boolean = false): GalsWeather? = withContext(Dispatchers.IO) {
++        load()?.takeIf { !force && System.currentTimeMillis() - it.fetchedAt < 6 * 60 * 60 * 1000L }
++            ?.let { return@withContext it }
++        runCatching {
++            val url = URL(
++                "https://api.open-meteo.com/v1/forecast" +
++                    "?latitude=47.02802&longitude=7.04981" +
++                    "&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,sunshine_duration" +
++                    "&timezone=Europe%2FZurich&forecast_days=5&models=meteoswiss_icon_seamless"
++            )
++            val connection = (url.openConnection() as HttpURLConnection).apply {
++                connectTimeout = 7000
++                readTimeout = 7000
++            }
++            try {
++                if (connection.responseCode != 200) error("HTTP ${connection.responseCode}")
++                GalsWeather.fromJson(connection.inputStream.bufferedReader().use { it.readText() })
++                    .also(::save)
++            } finally {
++                connection.disconnect()
++            }
++        }.getOrNull() ?: load()
++    }
++}
++
++data class CheckAdvice(val remaining: Int, val note: String)
++
++fun checkAdvice(plant: Plant, weather: GalsWeather?): CheckAdvice {
++    var interval = plant.intervalDays.coerceIn(2, 21)
++    val outside = plant.place == "outdoor"
++    if (outside && plant.exposure != "greenhouse" && weather?.fresh == true) {
++        if (weather.hot) interval = (interval - 1).coerceAtLeast(2)
++        if (weather.cool) interval = (interval + 1).coerceAtMost(21)
++    }
++    var remaining = interval - plant.daysSinceWatered
++    if (plant.soilState == "dry" && plant.daysSinceChecked <= 2) remaining = 0
++    if (plant.soilState in listOf("moist", "wet") && plant.daysSinceChecked <= 3) {
++        val wait = if (plant.soilState == "wet") 3 else 2
++        remaining = maxOf(remaining, wait - plant.daysSinceChecked)
++    }
++    val note = when {
++        !outside -> "Contrôle de la terre : le calendrier tient compte de votre dernier constat."
++        plant.exposure == "greenhouse" && weather?.fresh == true && weather.frost ->
++            "Serre plastique : arrosez beaucoup moins en période froide et humide. Risque de gel dehors : mesurez la température sous la serre."
++        plant.exposure == "greenhouse" && weather?.fresh == true && weather.greenhouseHeat ->
++            "Serre plastique : l'humidité peut limiter l'arrosage, mais le soleil peut assécher les pots. Vérifiez la terre, la température et aérez."
++        plant.exposure == "greenhouse" ->
++            "Sous serre : réduisez nettement l'arrosage si la terre reste humide. La pluie ne mouille pas les pots ; vérifiez la terre et le microclimat."
++        weather?.fresh != true -> "Prévisions indisponibles : vérifiez la terre et la météo locale."
++        plant.exposure == "open" && weather.rainExpected ->
++            "Précipitations prévues : vérifiez ensuite si l'eau a atteint le pot ; aucun arrosage n'est enregistré."
++        weather.hot -> "Plusieurs jours chauds : contrôlez la terre plus tôt."
++        weather.cool -> "Plusieurs jours frais : vérifiez la terre avant d'arroser."
++        else -> "Prévisions de Gals prises en compte ; vérifiez la terre avant d'arroser."
++    }
++    return CheckAdvice(remaining, note)
++}
+--- a/README.md
++++ b/README.md
+@@ -5 +5 @@
+-## Version 0.5.0
++## Version 0.6.0
+@@ -8 +8 @@
+-- mascotte animée et humidité clairement indiquée comme estimation ;
++- mascotte animée et date de vérification de la terre, sans faux pourcentage d'humidité ;
+@@ -10,2 +10,6 @@
+-- saisie des arrosages en décilitres et historique local ;
+-- ajout de plantes et rappels Android quotidiens ;
++- saisie du dernier arrosage en décilitres et de l'état observé du substrat ;
++- ajout manuel de plantes ou import d'une fiche JSON préparée avec ChatGPT ;
++- emplacement intérieur ou extérieur et état extérieur par pot (pluie, abri, serre plastique) ;
++- prévisions pour Gals issues de MétéoSuisse via Open-Meteo, affichées et actualisées ;
++- contrôles avancés/espacés selon la météo extérieure et l'observation du substrat ;
++- alertes visibles et notifications de gel potentiel et de chaleur potentielle sous serre ;
+@@ -16 +20 @@
+-L’IA produit des conseils indicatifs : l’identification et les besoins réels de chaque plante doivent rester vérifiés.
++Les prévisions sont calculées pour l'extérieur et ne mesurent ni la température de la serre ni l'eau dans les pots. Vérifier le substrat avant tout arrosage. L'IA produit des conseils indicatifs : l'identification et les besoins réels de chaque plante doivent rester vérifiés.
