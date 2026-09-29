@@ -1,0 +1,283 @@
+--- a/app/build.gradle.kts	2026-09-29 20:54:52.345700696 +0300
++++ b/app/build.gradle.kts	2026-09-29 20:52:39.770826009 +0300
+@@ -14,8 +14,8 @@
+         applicationId = "ch.yanick.plantbot"
+         minSdk = 26
+         targetSdk = 35
+-        versionCode = 16
+-        versionName = "0.6.0"
++        versionCode = 17
++        versionName = "0.6.1"
+     }
+     buildFeatures { compose = true }
+     compileOptions {
+--- a/app/src/main/java/ch/yanick/plantbot/MainActivity.kt	2026-09-29 20:54:52.345521172 +0300
++++ b/app/src/main/java/ch/yanick/plantbot/MainActivity.kt	2026-09-29 20:53:27.396775162 +0300
+@@ -78,6 +78,10 @@
+ import java.util.UUID
+ import java.security.MessageDigest
+ import java.util.Date
++import java.time.Duration
++import java.time.LocalDate
++import java.time.ZoneId
++import java.time.ZonedDateTime
+ import kotlinx.coroutines.runBlocking
+ import java.util.Locale
+ import java.util.concurrent.TimeUnit
+@@ -126,14 +130,24 @@
+     private fun createChannel() {
+         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+             getSystemService(NotificationManager::class.java).createNotificationChannel(
+-                NotificationChannel("watering", "Rappels d’arrosage", NotificationManager.IMPORTANCE_DEFAULT)
++                NotificationChannel("watering", "Rappels des plantes", NotificationManager.IMPORTANCE_DEFAULT)
+             )
+         }
+     }
+ 
+     private fun scheduleChecks() {
+-        val request = PeriodicWorkRequestBuilder<WateringWorker>(1, TimeUnit.DAYS).build()
+-        WorkManager.getInstance(this).enqueueUniquePeriodicWork("plant-check", ExistingPeriodicWorkPolicy.KEEP, request)
++        val zone = ZoneId.of("Europe/Zurich")
++        val now = ZonedDateTime.now(zone)
++        var next = now.withHour(18).withMinute(0).withSecond(0).withNano(0)
++        if (!next.isAfter(now)) next = next.plusDays(1)
++        val delay = Duration.between(now, next).toMillis()
++        val manager = WorkManager.getInstance(this)
++        val request = PeriodicWorkRequestBuilder<WateringWorker>(1, TimeUnit.DAYS)
++            .setInitialDelay(delay, TimeUnit.MILLISECONDS)
++            .build()
++        manager.enqueueUniquePeriodicWork("plant-check", ExistingPeriodicWorkPolicy.CANCEL_AND_REENQUEUE, request)
++        manager.enqueueUniqueWork("plant-opening-check", ExistingWorkPolicy.REPLACE,
++            OneTimeWorkRequestBuilder<WateringWorker>().build())
+     }
+ }
+ private fun initializeDebugAppCheck(context: Context): String {
+@@ -162,22 +176,43 @@
+         }
+         val due = plants.filter { checkAdvice(it, weather).remaining <= 0 }
+         if (due.isNotEmpty()) {
+-            val notification = NotificationCompat.Builder(applicationContext, "watering")
+-                .setSmallIcon(android.R.drawable.ic_popup_reminder)
+-                .setContentTitle("Plant’Bot a besoin de toi 💧")
+-                .setContentText("${due.first().name} est à vérifier${if (due.size > 1) " et ${due.size - 1} autre(s) plante(s)" else ""}.")
+-                .setAutoCancel(true)
+-                .build()
+-            applicationContext.getSystemService(NotificationManager::class.java).notify(1001, notification)
++            val prefs = applicationContext.getSharedPreferences("plant_notifications", Context.MODE_PRIVATE)
++            val today = LocalDate.now(ZoneId.of("Europe/Zurich")).toString()
++            if (prefs.getString("last_due_alert_date", "") != today) {
++                val notification = NotificationCompat.Builder(applicationContext, "watering")
++                    .setSmallIcon(android.R.drawable.ic_popup_reminder)
++                    .setContentTitle("Plant’Bot · terre à vérifier 💧")
++                    .setContentText("${due.first().name} est à vérifier${if (due.size > 1) " et ${due.size - 1} autre(s) plante(s)" else ""}.")
++                    .setAutoCancel(true)
++                    .build()
++                applicationContext.getSystemService(NotificationManager::class.java).notify(1001, notification)
++                prefs.edit().putString("last_due_alert_date", today).apply()
++            }
+         }
+         sendWeatherAlerts(applicationContext, plants, weather)
+         return Result.success()
+     }
+ }
+ 
+-private fun canNotify(context: Context): Boolean =
+-    Build.VERSION.SDK_INT < 33 ||
+-        ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
++private fun canNotify(context: Context): Boolean {
++    if (Build.VERSION.SDK_INT >= 33 &&
++        ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return false
++    val manager = context.getSystemService(NotificationManager::class.java)
++    return manager.areNotificationsEnabled() &&
++        (Build.VERSION.SDK_INT < 26 || manager.getNotificationChannel("watering")?.importance != NotificationManager.IMPORTANCE_NONE)
++}
++
++private fun sendTestNotification(context: Context): Boolean {
++    if (!canNotify(context)) return false
++    context.getSystemService(NotificationManager::class.java).notify(1099,
++        NotificationCompat.Builder(context, "watering")
++            .setSmallIcon(android.R.drawable.ic_popup_reminder)
++            .setContentTitle("PlantBot · notification de test")
++            .setContentText("Les rappels de contrôle peuvent s’afficher sur ce téléphone.")
++            .setAutoCancel(true)
++            .build())
++    return true
++}
+ 
+ private fun sendWeatherAlerts(context: Context, plants: List<Plant>, weather: GalsWeather?) {
+     if (weather?.fresh != true || plants.none { it.place == "outdoor" }) return
+@@ -501,7 +536,7 @@
+         item {
+             Card(shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
+                 Row(Modifier.fillMaxWidth().padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
+-                    Column(Modifier.weight(1f)) { Text("Notifications", fontWeight = FontWeight.Bold, color = DarkGreen); Text("Rappels quotidiens d’arrosage", color = Color.Gray, fontSize = 13.sp) }
++                    Column(Modifier.weight(1f)) { Text("Notifications", fontWeight = FontWeight.Bold, color = DarkGreen); Text("Contrôles des plantes vers 18 h et alertes météo", color = Color.Gray, fontSize = 13.sp) }
+                     Switch(checked = enabled, onCheckedChange = { enabled = it; store.setNotificationsEnabled(it) })
+                 }
+             }
+@@ -509,6 +544,15 @@
+         item { SettingCard("Unité d’arrosage", "Décilitres (dl)") }
+         item { SettingCard("Synchronisation du foyer", syncStatus) }
+         item {
++            var testStatus by remember { mutableStateOf("") }
++            OutlinedButton(onClick = {
++                testStatus = if (!enabled) "Activez d’abord les notifications dans PlantBot."
++                    else if (sendTestNotification(context)) "Notification de test envoyée."
++                    else "Notifications bloquées par Android : ouvrez les réglages ci-dessous."
++            }, modifier = Modifier.fillMaxWidth()) { Text("Tester une notification") }
++            if (testStatus.isNotBlank()) Text(testStatus, fontSize = 12.sp, color = DarkGreen)
++        }
++        item {
+             Card(shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
+                 Column(Modifier.fillMaxWidth().padding(18.dp)) {
+                     Text("Clé App Check de test", fontWeight = FontWeight.Bold, color = DarkGreen)
+@@ -538,7 +582,7 @@
+                 context.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName))
+             }, modifier = Modifier.fillMaxWidth()) { Text("Ouvrir les réglages Android des notifications") }
+         }
+-        item { Text("Plant’Bot 0.6.0 · Gals et suivi des plantes.", color = Color.Gray, fontSize = 12.sp) }
++        item { Text("Plant’Bot 0.6.1 · Rappels améliorés.", color = Color.Gray, fontSize = 12.sp) }
+     }
+ }
+--- a/app/build.gradle.kts	2026-09-29 20:54:52.345700696 +0300
++++ b/app/build.gradle.kts	2026-09-29 20:52:39.770826009 +0300
+@@ -14,8 +14,8 @@
+         applicationId = "ch.yanick.plantbot"
+         minSdk = 26
+         targetSdk = 35
+-        versionCode = 16
+-        versionName = "0.6.0"
++        versionCode = 17
++        versionName = "0.6.1"
+     }
+     buildFeatures { compose = true }
+     compileOptions {
+--- a/app/src/main/java/ch/yanick/plantbot/MainActivity.kt	2026-09-29 20:54:52.345521172 +0300
++++ b/app/src/main/java/ch/yanick/plantbot/MainActivity.kt	2026-09-29 20:53:27.396775162 +0300
+@@ -78,6 +78,10 @@
+ import java.util.UUID
+ import java.security.MessageDigest
+ import java.util.Date
++import java.time.Duration
++import java.time.LocalDate
++import java.time.ZoneId
++import java.time.ZonedDateTime
+ import kotlinx.coroutines.runBlocking
+ import java.util.Locale
+ import java.util.concurrent.TimeUnit
+@@ -126,14 +130,24 @@
+     private fun createChannel() {
+         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+             getSystemService(NotificationManager::class.java).createNotificationChannel(
+-                NotificationChannel("watering", "Rappels d’arrosage", NotificationManager.IMPORTANCE_DEFAULT)
++                NotificationChannel("watering", "Rappels des plantes", NotificationManager.IMPORTANCE_DEFAULT)
+             )
+         }
+     }
+ 
+     private fun scheduleChecks() {
+-        val request = PeriodicWorkRequestBuilder<WateringWorker>(1, TimeUnit.DAYS).build()
+-        WorkManager.getInstance(this).enqueueUniquePeriodicWork("plant-check", ExistingPeriodicWorkPolicy.KEEP, request)
++        val zone = ZoneId.of("Europe/Zurich")
++        val now = ZonedDateTime.now(zone)
++        var next = now.withHour(18).withMinute(0).withSecond(0).withNano(0)
++        if (!next.isAfter(now)) next = next.plusDays(1)
++        val delay = Duration.between(now, next).toMillis()
++        val manager = WorkManager.getInstance(this)
++        val request = PeriodicWorkRequestBuilder<WateringWorker>(1, TimeUnit.DAYS)
++            .setInitialDelay(delay, TimeUnit.MILLISECONDS)
++            .build()
++        manager.enqueueUniquePeriodicWork("plant-check", ExistingPeriodicWorkPolicy.CANCEL_AND_REENQUEUE, request)
++        manager.enqueueUniqueWork("plant-opening-check", ExistingWorkPolicy.REPLACE,
++            OneTimeWorkRequestBuilder<WateringWorker>().build())
+     }
+ }
+ private fun initializeDebugAppCheck(context: Context): String {
+@@ -162,22 +176,43 @@
+         }
+         val due = plants.filter { checkAdvice(it, weather).remaining <= 0 }
+         if (due.isNotEmpty()) {
+-            val notification = NotificationCompat.Builder(applicationContext, "watering")
+-                .setSmallIcon(android.R.drawable.ic_popup_reminder)
+-                .setContentTitle("Plant’Bot a besoin de toi 💧")
+-                .setContentText("${due.first().name} est à vérifier${if (due.size > 1) " et ${due.size - 1} autre(s) plante(s)" else ""}.")
+-                .setAutoCancel(true)
+-                .build()
+-            applicationContext.getSystemService(NotificationManager::class.java).notify(1001, notification)
++            val prefs = applicationContext.getSharedPreferences("plant_notifications", Context.MODE_PRIVATE)
++            val today = LocalDate.now(ZoneId.of("Europe/Zurich")).toString()
++            if (prefs.getString("last_due_alert_date", "") != today) {
++                val notification = NotificationCompat.Builder(applicationContext, "watering")
++                    .setSmallIcon(android.R.drawable.ic_popup_reminder)
++                    .setContentTitle("Plant’Bot · terre à vérifier 💧")
++                    .setContentText("${due.first().name} est à vérifier${if (due.size > 1) " et ${due.size - 1} autre(s) plante(s)" else ""}.")
++                    .setAutoCancel(true)
++                    .build()
++                applicationContext.getSystemService(NotificationManager::class.java).notify(1001, notification)
++                prefs.edit().putString("last_due_alert_date", today).apply()
++            }
+         }
+         sendWeatherAlerts(applicationContext, plants, weather)
+         return Result.success()
+     }
+ }
+ 
+-private fun canNotify(context: Context): Boolean =
+-    Build.VERSION.SDK_INT < 33 ||
+-        ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
++private fun canNotify(context: Context): Boolean {
++    if (Build.VERSION.SDK_INT >= 33 &&
++        ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return false
++    val manager = context.getSystemService(NotificationManager::class.java)
++    return manager.areNotificationsEnabled() &&
++        (Build.VERSION.SDK_INT < 26 || manager.getNotificationChannel("watering")?.importance != NotificationManager.IMPORTANCE_NONE)
++}
++
++private fun sendTestNotification(context: Context): Boolean {
++    if (!canNotify(context)) return false
++    context.getSystemService(NotificationManager::class.java).notify(1099,
++        NotificationCompat.Builder(context, "watering")
++            .setSmallIcon(android.R.drawable.ic_popup_reminder)
++            .setContentTitle("PlantBot · notification de test")
++            .setContentText("Les rappels de contrôle peuvent s’afficher sur ce téléphone.")
++            .setAutoCancel(true)
++            .build())
++    return true
++}
+ 
+ private fun sendWeatherAlerts(context: Context, plants: List<Plant>, weather: GalsWeather?) {
+     if (weather?.fresh != true || plants.none { it.place == "outdoor" }) return
+@@ -501,7 +536,7 @@
+         item {
+             Card(shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
+                 Row(Modifier.fillMaxWidth().padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
+-                    Column(Modifier.weight(1f)) { Text("Notifications", fontWeight = FontWeight.Bold, color = DarkGreen); Text("Rappels quotidiens d’arrosage", color = Color.Gray, fontSize = 13.sp) }
++                    Column(Modifier.weight(1f)) { Text("Notifications", fontWeight = FontWeight.Bold, color = DarkGreen); Text("Contrôles des plantes vers 18 h et alertes météo", color = Color.Gray, fontSize = 13.sp) }
+                     Switch(checked = enabled, onCheckedChange = { enabled = it; store.setNotificationsEnabled(it) })
+                 }
+             }
+@@ -509,6 +544,15 @@
+         item { SettingCard("Unité d’arrosage", "Décilitres (dl)") }
+         item { SettingCard("Synchronisation du foyer", syncStatus) }
+         item {
++            var testStatus by remember { mutableStateOf("") }
++            OutlinedButton(onClick = {
++                testStatus = if (!enabled) "Activez d’abord les notifications dans PlantBot."
++                    else if (sendTestNotification(context)) "Notification de test envoyée."
++                    else "Notifications bloquées par Android : ouvrez les réglages ci-dessous."
++            }, modifier = Modifier.fillMaxWidth()) { Text("Tester une notification") }
++            if (testStatus.isNotBlank()) Text(testStatus, fontSize = 12.sp, color = DarkGreen)
++        }
++        item {
+             Card(shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
+                 Column(Modifier.fillMaxWidth().padding(18.dp)) {
+                     Text("Clé App Check de test", fontWeight = FontWeight.Bold, color = DarkGreen)
+@@ -538,7 +582,7 @@
+                 context.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName))
+             }, modifier = Modifier.fillMaxWidth()) { Text("Ouvrir les réglages Android des notifications") }
+         }
+-        item { Text("Plant’Bot 0.6.0 · Gals et suivi des plantes.", color = Color.Gray, fontSize = 12.sp) }
++        item { Text("Plant’Bot 0.6.1 · Rappels améliorés.", color = Color.Gray, fontSize = 12.sp) }
+     }
+ }
+  
